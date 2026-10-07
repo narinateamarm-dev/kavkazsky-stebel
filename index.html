@@ -287,6 +287,9 @@ p{margin:0}
 .s-tg{background:#2A8BC8}
 .s-max{background:linear-gradient(135deg,#3F5BFF,#8A3FFF)}
 .s-copy{background:var(--card);color:var(--plum);border:1px solid var(--line2)}
+.hp{position:absolute!important;left:-9999px;width:1px;height:1px;opacity:0}
+.fields label.need input{border-color:#C0564B;box-shadow:0 0 0 2px rgba(192,86,75,.18)}
+.reg-note{margin-top:12px;background:#E6F6EA;color:#245B33;border-radius:12px;padding:10px 12px;font-size:14px}
 .send-note{font-size:12.5px;color:var(--muted);margin-top:10px}
 .copybox{width:100%;height:160px;margin-top:10px;border-radius:12px;border:1px solid var(--line2);padding:10px;font-size:13px}
 .link{display:block;margin:18px auto 0;border:0;background:none;color:var(--muted);text-decoration:underline;font-size:14px}
@@ -517,9 +520,11 @@ p{margin:0}
     </fieldset>
     <div class="fields">
       <label for="oName">Имя или компания<input id="oName" autocomplete="organization"></label>
+      <label for="oPhone">Телефон для связи<input id="oPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+7 900 000-00-00"></label>
       <label for="oCity">Город<input id="oCity" autocomplete="address-level2"></label>
       <label for="oDate">Желаемая дата отгрузки<input id="oDate" placeholder="например, 4 марта"></label>
       <label for="oNote">Комментарий<textarea id="oNote" rows="2" placeholder="упаковка, открытки, возможные замены"></textarea></label>
+      <input id="oWeb" class="hp" tabindex="-1" autocomplete="off" aria-hidden="true">
     </div>
     <p class="send-h">Отправить расчёт Карену и Сюзанне</p>
     <div class="send">
@@ -528,6 +533,7 @@ p{margin:0}
       <button id="sendMax" type="button" class="s s-max"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5a9.5 9.5 0 0 0-8.3 14.1L2.5 21.5l5-1.2A9.5 9.5 0 1 0 12 2.5Zm-3.6 13V8.6h1.7l1.9 3 1.9-3h1.7v6.9h-1.7v-4.1l-1.9 2.8-1.9-2.8v4.1Z" fill="currentColor"/></svg>MAX</button>
       <button id="sendCopy" type="button" class="s s-copy">Скопировать текст</button>
     </div>
+    <p class="reg-note" id="regNote" hidden></p>
     <p class="send-note">В WhatsApp расчёт подставится сам. Для Telegram и MAX текст копируется — останется вставить его в чат с номером 8 928 335-85-85.</p>
     <textarea id="copyBox" class="copybox" hidden readonly aria-label="Текст расчёта"></textarea>
     <button id="sumClear" type="button" class="link">Очистить заказ</button>
@@ -546,6 +552,7 @@ p{margin:0}
 const CFG = {
   phoneText: '8 928 335-85-85',
   phoneRaw: '79283358585',            // для WhatsApp и Telegram
+  orderEndpoint: '',      // адрес реестра заказов (Google Apps Script); пусто — реестр выключен
   supplier: 'Качарян Карен Хачикович',
   region: 'Ставропольский край',
   season: '2027',
@@ -917,15 +924,51 @@ function openVariety(id) {
   openSheet('var');
 }
 
+/* ───────── номер заказа и реестр ───────── */
+const field = id => { const e = $('#' + id); return e ? e.value.trim() : ''; };
+function orderSig() { return JSON.stringify([S.qty, S.bq]); }
+function orderId() {
+  let cur = store.get('oid', null);
+  const sig = orderSig();
+  if (!cur || (cur.sent && cur.sig !== sig)) {
+    const d = new Date(), p2 = n => String(n).padStart(2, '0');
+    cur = { id: `КС-${p2(d.getDate())}${p2(d.getMonth() + 1)}-${String(Math.floor(1000 + Math.random() * 9000))}`, sig, sent: false };
+    store.set('oid', cur);
+  }
+  return cur.id;
+}
+function register(channel) {
+  const id = orderId();
+  if (!CFG.orderEndpoint || CFG.orderEndpoint.indexOf('%%') === 0) return id;
+  const t = totals();
+  const payload = {
+    id, channel, hp: field('oWeb'),
+    name: field('oName'), phone: field('oPhone'), city: field('oCity'), date: field('oDate'), note: field('oNote'),
+    pay: S.pay, stems: t.stems, tier: t.stems ? CFG.tierNames[t.tier] : '', sumTulips: t.sum, bagCount: t.bqCount,
+    total: t.total, prepay: t.prepay,
+    items: VARS.filter(v => S.qty[v.id]).map(v => ({ name: v.name, n: S.qty[v.id], price: v.p[t.tier] })),
+    bags: BOUQ.filter(b => S.bq[b.id]).map(b => ({ name: b.name, n: S.bq[b.id] }))
+  };
+  const body = JSON.stringify(payload);
+  let sent = false;
+  try { sent = navigator.sendBeacon && navigator.sendBeacon(CFG.orderEndpoint, new Blob([body], { type: 'text/plain;charset=utf-8' })); } catch (e) {}
+  if (!sent) { try { fetch(CFG.orderEndpoint, { method: 'POST', mode: 'no-cors', keepalive: true, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body }); } catch (e) {} }
+  store.set('oid', { id, sig: orderSig(), sent: true });
+  const r = $('#regNote');
+  if (r) { r.hidden = false; r.textContent = `Заказ № ${id} передан Карену и Сюзанне. Номер пригодится, если будете уточнять заказ.`; }
+  return id;
+}
+
 /* ───────── итог и отправка ───────── */
 function orderText() {
-  const t = totals(), f = id => { const e = $('#' + id); return e ? e.value.trim() : ''; };
-  const L = ['Здравствуйте, Карен и Сюзанна! Хочу оформить заказ:', ''];
+  const t = totals(), f = field;
+  const L = [`Здравствуйте, Карен и Сюзанна! Хочу оформить заказ № ${orderId()}:`, ''];
   VARS.forEach(v => { const n = S.qty[v.id]; if (n) L.push(`• ${v.name} — ${fmt(n)} шт × ${v.p[t.tier]} ₽ = ${rub(n * v.p[t.tier])}`); });
   if (t.stems) L.push(`Тюльпанов: ${fmt(t.stems)} шт (цена ${CFG.tierNames[t.tier]}) — ${rub(t.sum)}`);
   BOUQ.forEach(b => { const n = S.bq[b.id]; if (n) L.push(b.price ? `• Сумка-букет «${b.name}» — ${fmt(n)} × ${rub(b.price)} = ${rub(n * b.price)}` : `• Сумка-букет «${b.name}» (${b.color}) — ${fmt(n)} шт, цена по запросу`); });
   L.push('', `Итого: ${rub(t.total)}`, `Предоплата 20%: ${rub(t.prepay)}`, `Оплата: ${S.pay === 'cash' ? 'наличные' : 'перевод'}`);
   if (f('oName')) L.push(`Имя / компания: ${f('oName')}`);
+  if (f('oPhone')) L.push(`Телефон: ${f('oPhone')}`);
   if (f('oCity')) L.push(`Город: ${f('oCity')}`);
   if (f('oDate')) L.push(`Желаемая дата: ${f('oDate')}`);
   if (f('oNote')) L.push(`Комментарий: ${f('oNote')}`);
@@ -964,37 +1007,49 @@ function wireSummary() {
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') $$('.sheet.on').forEach(closeSheet); });
   $$('input[name="pay"]').forEach(r => r.addEventListener('change', () => { S.pay = r.value; save(); }));
-  ['oName', 'oCity', 'oDate', 'oNote'].forEach(id => {
+  ['oName', 'oPhone', 'oCity', 'oDate', 'oNote'].forEach(id => {
     const e = $('#' + id); if (!e) return;
     e.value = store.get(id, ''); e.addEventListener('input', () => store.set(id, e.value));
   });
-  const guard = () => { const t = totals(); if (!t.total) { note('Сначала добавьте сорта или букеты'); return false; } return true; };
+  const guard = () => {
+    const t = totals();
+    if (!t.total && !t.bqCount) { note('Сначала добавьте сорта или сумки-букеты'); return false; }
+    if (field('oPhone').replace(/\D/g, '').length < 10) {
+      note('Укажите телефон — по нему мы свяжемся с вами по заказу');
+      const ph = $('#oPhone'); if (ph) { ph.focus(); ph.closest('label').classList.add('need'); }
+      return false;
+    }
+    return true;
+  };
   const wa = $('#sendWa');
   if (wa) wa.addEventListener('click', e => {
     if (!guard()) { e.preventDefault(); return; }
     wa.href = `https://wa.me/${CFG.phoneRaw}?text=${encodeURIComponent(orderText())}`;
+    register('WhatsApp');
   });
   const tg = $('#sendTg');
   if (tg) tg.addEventListener('click', async e => {
     if (!guard()) { e.preventDefault(); return; }
     const ok = await copy(orderText());
+    register('Telegram');
     note(ok ? 'Расчёт скопирован — вставьте его в чат Telegram' : 'Выделите текст расчёта ниже и скопируйте');
   });
   const mx = $('#sendMax');
   if (mx) mx.addEventListener('click', async () => {
     if (!guard()) return;
     const ok = await copy(orderText());
+    register('MAX');
     note(ok ? `Расчёт скопирован. Откройте MAX и вставьте его в чат с номером ${CFG.phoneText}` : 'Выделите текст расчёта ниже и скопируйте');
   });
   const cp = $('#sendCopy');
   if (cp) cp.addEventListener('click', async () => {
     if (!guard()) return;
-    const ok = await copy(orderText()); note(ok ? 'Расчёт скопирован' : 'Выделите текст ниже и скопируйте');
+    const ok = await copy(orderText()); register('Копия текста'); note(ok ? 'Расчёт скопирован' : 'Выделите текст ниже и скопируйте');
   });
   const clr = $('#sumClear');
   if (clr) clr.addEventListener('click', () => {
     if (clr.dataset.sure !== '1') { clr.dataset.sure = '1'; clr.textContent = 'Точно очистить?'; setTimeout(() => { clr.dataset.sure = ''; clr.textContent = 'Очистить заказ'; }, 3000); return; }
-    S.qty = {}; S.bq = {}; save(); update(); renderSummary(); clr.dataset.sure = ''; clr.textContent = 'Очистить заказ'; note('Заказ очищен');
+    S.qty = {}; S.bq = {}; store.set('oid', null); save(); update(); renderSummary(); clr.dataset.sure = ''; clr.textContent = 'Очистить заказ'; note('Заказ очищен');
   });
   $$('[data-copyphone]').forEach(b => b.addEventListener('click', async () => {
     const ok = await copy('+' + CFG.phoneRaw); note(ok ? 'Номер скопирован' : CFG.phoneText);
